@@ -1,92 +1,31 @@
 import os
-import requests
 import subprocess
-from telegram import Update
-from dotenv import load_dotenv
-from flask import Flask, send_from_directory
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
-load_dotenv()
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-VIDEO_DIR = os.getenv("VIDEO_DIR", "./videos")
-BASE_URL = os.getenv("BASE_URL", "http://localhost")
+def start(update, context):
+    update.message.reply_text("Salut ! Envoie-moi une vidéo, je vais la compresser pour toi.")
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN not found in environment variables.")
+def compress_video(update, context):
+    msg = update.message.reply_text("Téléchargement et compression en cours... Patiente un peu ⏳")
+    video_file = context.bot.get_file(update.message.video.file_id)
+    video_file.download("input.mp4")
+    
+    # Commande magique FFmpeg pour diviser la taille par 4
+    cmd = "ffmpeg -i input.mp4 -vcodec libx264 -crf 28 output.mp4 -y"
+    subprocess.run(cmd, shell=True)
+    
+    with open("output.mp4", "rb") as f:
+        context.bot.send_video(chat_id=update.message.chat_id, video=f, caption="Et voilà ! Ta vidéo compressée ⚡")
+    
+    os.remove("input.mp4")
+    os.remove("output.mp4")
+    msg.delete()
 
-os.makedirs(VIDEO_DIR, exist_ok=True)
-
-app = Flask(__name__)
-
-@app.route('/videos/<path:filename>')
-def serve_video(filename):
-    return send_from_directory(VIDEO_DIR, filename)
-
-async def start(update: Update, context: CallbackContext):
-    await update.message.reply_text("Send me a URL of a video, and I'll compress it for you!")
-
-async def handle_url(update: Update, context: CallbackContext):
-    url = update.message.text.strip()
-    user_id = update.message.chat_id
-
-    if not (url.startswith("http://") or url.startswith("https://")):
-        await update.message.reply_text("Invalid URL! Please send a valid URL.")
-        return
-
-    try:
-        response = requests.head(url, allow_redirects=True)
-        if response.status_code != 200:
-            await update.message.reply_text(f"URL is not accessible! Status code: {response.status_code}")
-            return
-        content_length = response.headers.get('content-length', 'unknown')
-        await update.message.reply_text(f"URL is valid! File size: {content_length} bytes")
-    except Exception as e:
-        await update.message.reply_text(f"Error validating URL: {e}")
-        return
-
-    await update.message.reply_text("Downloading video... Please wait.")
-    try:
-        file_path = os.path.join(VIDEO_DIR, f"{user_id}_video.mp4")
-        download_video(url, file_path)
-
-        compressed_path = os.path.join(VIDEO_DIR, f"{user_id}_compressed.mp4")
-        compress_video(file_path, compressed_path)
-
-        await update.message.reply_text("Video compressed successfully!")
-
-        if os.path.getsize(compressed_path) > 50 * 1024 * 1024:
-            download_url = f"{BASE_URL}/videos/{user_id}_compressed.mp4"
-            await update.message.reply_text(
-                f"The file is too large to send via Telegram. You can download it from: {download_url}"
-            )
-        else:
-            await update.message.reply_document(document=open(compressed_path, "rb"))
-    except Exception as e:
-        await update.message.reply_text(f"Error processing video: {e}")
-
-def download_video(url: str, file_path: str):
-    with requests.get(url, stream=True) as r:
-        r.raise_for_status()
-        with open(file_path, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-def compress_video(input_file: str, output_file: str):
-    command = ["ffmpeg", "-y", "-i", input_file, "-vcodec", "libx264", "-crf", "32", output_file]
-    subprocess.run(command, check=True)
-
-def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-
-    from threading import Thread
-    flask_thread = Thread(target=app.run, kwargs={"host": "0.0.0.0", "port": 5000})
-    flask_thread.start()
-
-    application.run_polling()
-
-if __name__ == "__main__":
-    main()
+updater = Updater(TOKEN)
+dp = updater.dispatcher
+dp.add_handler(CommandHandler("start", start))
+dp.add_handler(MessageHandler(Filters.video, compress_video))
+updater.start_polling()
+updater.idle()
